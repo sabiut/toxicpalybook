@@ -1,0 +1,42 @@
+# Project Configuration
+project_name: "ToxicPerformance"
+stack_name: "ToxicPerformancePipelineStack"
+
+# Bitbucket Repository Configuration
+bitbucket_repo: "tisecurities/toxic_performance"
+bitbucket_branch: "master"
+
+# ECR Configuration
+ecr_repo_name: "toxicperformance"
+ecr_repository_uri: "{{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com/{{ ecr_repo_name }}:latest"
+
+# EventBridge Configuration
+existing_event_bridge_role_name: "ToxicPerformanceEventBridgeRole"
+
+# CloudFormation Template Paths
+batch_job_template_path: "templates/Toxicperformance-batch-job-template.yml"
+
+# CodeStar Connection
+codestar_connection_name: "ToxicPer-CodeStarConn"
+
+# AWS Configuration
+aws_region: "ap-southeast-2"
+aws_account_id: "{{ lookup('env', 'AWS_ACCOUNT_ID') }}"
+
+# VPC Configuration
+vpc_id: "vpc-cb5568ac"
+subnet_ids:
+  - subnet-12345678
+  - subnet-87654321
+security_group_id: "sg-0b59b6ab63a1505d7"
+
+# Batch Job Configuration
+create_log_group: "true"
+codebuild_compute_type: "BUILD_GENERAL1_SMALL"
+codebuild_image_type: "aws/codebuild/amazonlinux2-x86_64-standard:3.0"
+
+# S3 Bucket for Artifacts
+artifact_bucket_suffix: "{{ 999999 | random }}"
+
+# Additional Configuration
+batch_job_stack_name: "{{ stack_name }}-BatchJobStack"

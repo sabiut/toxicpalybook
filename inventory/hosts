@@ -1,0 +1,8 @@
+[local]
+localhost ansible_connection=local
+
+[pipelines]
+marketposition ansible_connection=local
+handover ansible_connection=local
+pbookvariance ansible_connection=local
+toxicperformance ansible_connection=local

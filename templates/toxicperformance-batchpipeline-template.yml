@@ -1,0 +1,318 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CodePipeline for Toxic Performance AWS Batch deployment with Bitbucket and existing ECR"
+
+Parameters:
+  BitbucketRepoUrl:
+    Type: String
+    Description: Full repository ID (e.g., 'account-name/repo-name')
+
+  BitbucketBranchName:
+    Type: String
+    Description: Branch name to use for the source code
+
+  ExistingECRRepositoryName:
+    Type: String
+    Description: Name of the existing ECR repository
+
+  BatchJobStackName:
+    Type: String
+    Description: Name of the CloudFormation stack for the Batch job
+
+  CodeBuildProjectName:
+    Type: String
+    Description: Name for the CodeBuild project
+
+  CodeStarConnectionName:
+    Type: String
+    Description: Name for the CodeStar connection
+
+  PipelineName:
+    Type: String
+    Description: Name for the CodePipeline
+
+  ArtifactStoreBucketName:
+    Type: String
+    Description: Name for the S3 bucket to store pipeline artifacts
+
+  ExistingEventBridgeRoleName:
+    Type: String
+    Description: "The name of an existing EventBridge role to use."
+
+  CodeBuildComputeType:
+    Type: String
+    Description: CodeBuild compute type
+    Default: BUILD_GENERAL1_SMALL
+    AllowedValues:
+      - BUILD_GENERAL1_SMALL
+      - BUILD_GENERAL1_MEDIUM
+      - BUILD_GENERAL1_LARGE
+
+  CodeBuildImageType:
+    Type: String
+    Description: CodeBuild image type
+    Default: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+
+  BatchJobTemplatePath:
+    Type: String
+    Description: Path to the Batch Job CloudFormation template within the source code
+
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: "The ID of the VPC where AWS Batch resources will be created"
+
+  SubnetIds:
+    Type: CommaDelimitedList
+    Description: "Comma-separated list of subnet IDs"
+
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: "The ID of the existing security group for AWS Batch resources"
+
+  CreateLogGroup:
+    Type: String
+    Description: "Flag to determine if the log group should be created"
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+
+Conditions:
+  UseCustomArtifactBucketName: !Not [!Equals [!Ref ArtifactStoreBucketName, ""]]
+
+Resources:
+  CodeStarConnection:
+    Type: AWS::CodeStarConnections::Connection
+    Properties:
+      ConnectionName: !Ref CodeStarConnectionName
+      ProviderType: Bitbucket
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref CodeBuildProjectName
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: !Ref CodeBuildComputeType
+        Image: !Ref CodeBuildImageType
+        PrivilegedMode: true
+        Type: LINUX_CONTAINER
+        EnvironmentVariables:
+          - Name: ECR_REPO_URI
+            Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ExistingECRRepositoryName}
+          - Name: IMAGE_TAG
+            Value: !Ref AWS::StackName
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: buildspec.yml
+
+  CodePipelineArtifactStore:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        !If [
+          UseCustomArtifactBucketName,
+          !Ref ArtifactStoreBucketName,
+          !Ref AWS::NoValue,
+        ]
+      VersioningConfiguration:
+        Status: Enabled
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Ref PipelineName
+      ArtifactStore:
+        Location: !Ref CodePipelineArtifactStore
+        Type: S3
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: !Ref CodeStarConnection
+                FullRepositoryId: !Ref BitbucketRepoUrl
+                BranchName: !Ref BitbucketBranchName
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: Build
+          Actions:
+            - Name: BuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+        - Name: Deploy
+          Actions:
+            - Name: DeployAction
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: "1"
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: !Ref BatchJobStackName
+                TemplatePath: !Sub "SourceOutput::${BatchJobTemplatePath}"
+                Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                ParameterOverrides: !Sub |
+                  {
+                    "ImageUri": {"Fn::GetParam": ["BuildOutput", "imageDetail.json", "ImageURI"]},
+                    "VPCId": "${VPCId}",
+                    "SubnetIds": {"Fn::Join": [",", "${SubnetIds}"]},
+                    "SecurityGroupId": "${SecurityGroupId}",
+                    "CreateLogGroup": "${CreateLogGroup}",
+                    "ExistingEventBridgeRoleName": "${ExistingEventBridgeRoleName}"
+                  }
+              InputArtifacts:
+                - Name: SourceOutput
+                - Name: BuildOutput
+
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodePipelinePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "s3:*"
+                  - "codestar-connections:UseConnection"
+                  - "codebuild:*"
+                  - "cloudformation:*"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "iam:PassRole"
+                Resource:
+                  - "*"
+                  - !GetAtt CloudFormationExecutionRole.Arn
+                Condition:
+                  StringEqualsIfExists:
+                    iam:PassedToService:
+                      - cloudformation.amazonaws.com
+                      - elasticbeanstalk.amazonaws.com
+                      - ec2.amazonaws.com
+                      - ecs-tasks.amazonaws.com
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ecr:GetAuthorizationToken"
+                  - "ecr:BatchCheckLayerAvailability"
+                  - "ecr:GetDownloadUrlForLayer"
+                  - "ecr:GetRepositoryPolicy"
+                  - "ecr:DescribeRepositories"
+                  - "ecr:ListImages"
+                  - "ecr:DescribeImages"
+                  - "ecr:BatchGetImage"
+                  - "ecr:InitiateLayerUpload"
+                  - "ecr:UploadLayerPart"
+                  - "ecr:CompleteLayerUpload"
+                  - "ecr:PutImage"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"
+              - Effect: Allow
+                Action:
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                  - "s3:PutObject"
+                Resource:
+                  - !Sub "${CodePipelineArtifactStore.Arn}/*"
+
+  CloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudFormationExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "iam:*"
+                  - "ec2:*"
+                  - "batch:*"
+                  - "events:*"
+                  - "logs:*"
+                  - "ecr:*"
+                  - "ssm:GetParameter"
+                  - "ssm:GetParameters"
+                  - "ssm:GetParametersByPath"
+                Resource: "*"
+
+Outputs:
+  CodeStarConnectionArn:
+    Description: ARN of the CodeStar Connection
+    Value: !Ref CodeStarConnection
+
+  CodeBuildProjectName:
+    Description: Name of the CodeBuild Project
+    Value: !Ref CodeBuildProject
+
+  ECRRepositoryUri:
+    Description: URI of the existing ECR Repository
+    Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ExistingECRRepositoryName}
+
+  PipelineName:
+    Description: Name of the created pipeline
+    Value: !Ref Pipeline
+
+  ArtifactBucketName:
+    Description: Name of the S3 bucket used to store pipeline artifacts
+    Value: !Ref CodePipelineArtifactStore
+
+  CloudFormationExecutionRoleArn:
+    Description: ARN of the CloudFormation Execution Role
+    Value: !GetAtt CloudFormationExecutionRole.Arn

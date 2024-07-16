@@ -1,0 +1,80 @@
+- name: Deploy CodePipeline for AWS Batch
+  hosts: "{{ target_host }}"
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../host_vars/{{ target_host }}.yml"
+
+  vars:
+    cf_template: "{{ playbook_dir }}/../templates/toxicperformance-batchpipeline-template.yml"
+    cf_parameters:
+      BitbucketRepoUrl: "{{ bitbucket_repo }}"
+      BitbucketBranchName: "{{ bitbucket_branch }}"
+      ExistingECRRepositoryName: "{{ ecr_repo_name }}"
+      BatchJobStackName: "{{ stack_name }}-BatchJobStack"
+      CodeBuildProjectName: "{{ stack_name }}-CodeBuildProject"
+      CodeStarConnectionName: "{{ codestar_connection_name }}"
+      PipelineName: "{{ stack_name }}-Pipeline"
+      ArtifactStoreBucketName: "{{ project_name | lower }}-artifacts-{{ artifact_bucket_suffix }}"
+      ExistingEventBridgeRoleName: "{{ existing_event_bridge_role_name }}"
+      CodeBuildComputeType: "{{ codebuild_compute_type | default('BUILD_GENERAL1_SMALL') }}"
+      CodeBuildImageType: "{{ codebuild_image_type | default('aws/codebuild/amazonlinux2-x86_64-standard:3.0') }}"
+      BatchJobTemplatePath: "{{ batch_job_template_path }}"
+      VPCId: "{{ vpc_id }}"
+      SubnetIds: "{{ subnet_ids | join(',') }}" # Ensure this is a comma-separated string
+      SecurityGroupId: "{{ security_group_id }}"
+      CreateLogGroup: "{{ create_log_group }}"
+    cf_tags:
+      Stack: "{{ stack_name }}"
+      Project: "{{ project_name }}"
+
+  tasks:
+    - name: Debug variables
+      debug:
+        msg:
+          - "stack_name: {{ stack_name | default('undefined') }}"
+          - "project_name: {{ project_name | default('undefined') }}"
+          - "bitbucket_repo: {{ bitbucket_repo | default('undefined') }}"
+          - "codestar_connection_name: {{ codestar_connection_name | default('undefined') }}"
+
+    - name: Generate timestamp
+      set_fact:
+        timestamp: "{{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}"
+
+    - name: Create CloudFormation change set
+      amazon.aws.cloudformation:
+        stack_name: "{{ stack_name }}"
+        state: present
+        region: "{{ aws_region | default('ap-southeast-2') }}"
+        template: "{{ cf_template }}"
+        template_parameters: "{{ cf_parameters }}"
+        tags: "{{ cf_tags }}"
+        create_changeset: true
+        changeset_name: "{{ stack_name }}-changeset-{{ timestamp }}"
+      register: changeset_result
+
+    - name: Display change set
+      debug:
+        var: changeset_result
+
+    - name: Prompt for approval
+      pause:
+        prompt: "Review the change set above. Enter 'yes' to apply changes, or 'no' to abort"
+      register: approval_response
+
+    - name: Execute change set
+      amazon.aws.cloudformation:
+        stack_name: "{{ stack_name }}"
+        state: present
+        region: "{{ aws_region | default('ap-southeast-2') }}"
+        template: "{{ cf_template }}"
+        template_parameters: "{{ cf_parameters }}"
+        tags: "{{ cf_tags }}"
+      when: approval_response.user_input | lower == 'yes'
+      register: cloudformation_result
+
+    - name: Show stack outputs
+      debug:
+        var: cloudformation_result
+      when: cloudformation_result is defined

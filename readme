@@ -1,0 +1,3 @@
+
+##The ansible command to deploy each pipeline
+ansible-playbook playbooks/deploy-pipeline.yml -e "target_host=targethost"
